@@ -18,7 +18,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import IsolationForest
 from sklearn.cluster import DBSCAN
 
-
 # Veri setini oku
 df = pd.read_excel('new_filtered.xlsx')
 
