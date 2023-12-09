@@ -18,7 +18,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import IsolationForest
 from sklearn.cluster import DBSCAN
 
-#%%
+
 # Veri setini oku
 df = pd.read_excel('new_filtered.xlsx')
 
@@ -29,12 +29,9 @@ df = df.dropna()
 print(df.head())
 print(df.columns)
 
-
 #%% Verileri Aylık Olarak gruplayıp incele
-
 parameters = ['Tarih', 'Yıl', 'Müşteri Kodu', 'Ürün Kodu', 'Miktar', 'Birim Fiyat',
        'Toplam', 'Net Tutar']
-
 
 # Aylık olarak gruplama ve satışları toplama
 monthly_sales = df.resample('M', on='Tarih')['Miktar'].sum().reset_index()
@@ -48,10 +45,6 @@ plt.xlabel('Tarih')
 plt.ylabel('Toplam Satış (Miktar)')
 plt.grid(True)
 plt.show()
-
-print(df.info())
-
-#%%
 
 toplam_satis_miktari = df['Miktar'].sum()
 toplam_gelir = df['Toplam'].sum()
