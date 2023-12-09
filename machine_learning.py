@@ -397,7 +397,7 @@ print(df_train.info())
 
 
 #%%
-from fbprophet import Prophet
+from prophet import Prophet
 
 print(df_train.info())
 
@@ -580,7 +580,7 @@ plt.plot(test.index, predicted_values, label='SARIMA Tahmini (Miktar)')
 plt.legend()
 plt.show()
 
-#%%
+#%% Random forest
 
 print(df_filtered.head())
 
@@ -1370,4 +1370,604 @@ print('Prophet %s' % fbprophet.__version__)
 pro_selected = df_filtered.groupby("Ürün Kodu")["Miktar"].sum().sort_values(ascending=False).index[0]
 df_pro_selected = df_filtered[df_filtered["Ürün Kodu"] == pro_selected]
 
+
+#%%%
+
+def mape(y_true, y_pred):
+    ape = np.abs((y_true - y_pred) / y_true)
+    #ape[~np.isfinite(ape)] = 0. # VERY questionable
+    ape[~np.isfinite(ape)] = 1. # pessimist estimate
+    return np.mean(ape)
+
+def wmape(y_true, y_pred):
+    return np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true))
+
+
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+
+
+def train_and_evaluate_model(df_week):
+    melt2 = df_week.copy()
+    melt2['Product_Code'] = df_week['Ürün Kodu'].str.extract('(\d+)', expand=False).astype(int)
+    melt2['Month'] = df_week['Ay']
+    melt2['Week'] = df_week['Hafta']
+    melt2['Sales'] = melt2['Miktar']
+    melt2 = melt2.drop(['Ürün Kodu', 'Müşteri Kodu', 'Net Tutar', 'Toplam', 'Hafta', 'Ay', 'Birim Fiyat', 'Tarih', 'Yıl', 'Miktar'], axis=1)
+
+    label_encoder = LabelEncoder()
+    melt2['Product_Code'] = label_encoder.fit_transform(melt2['Product_Code']) + 1
+
+    split_point = 65
+    melt_train = melt2[melt2['Month'] < split_point].copy()
+    melt_valid = melt2[melt2['Month'] >= split_point].copy()
+
+    melt_train['sales_next_month'] = melt_train.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid['sales_next_month'] = melt_valid.groupby("Product_Code")['Sales'].shift(-1)
+    melt_train = melt_train.dropna()
+
+    melt_train["lag_sales_1"] = melt_train.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_valid["lag_sales_1"] = melt_valid.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_train["diff_sales_1"] = melt_train.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_valid["diff_sales_1"] = melt_valid.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_train["mean_sales_4"] = melt_train.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    melt_valid["mean_sales_4"] = melt_valid.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    features = ['Sales', 'lag_sales_1', 'diff_sales_1', 'mean_sales_4']
+    target = 'sales_next_month'
+
+    X_train = melt_train[features]
+    y_train = melt_train[target]
+    X_valid = melt_valid[features]
+    y_valid = melt_valid[target]
+
+    imputer = SimpleImputer()
+    X_train_imputed = imputer.fit_transform(X_train)
+    X_valid_imputed = imputer.transform(X_valid)
+
+    linear_reg_model = LinearRegression()
+    linear_reg_model.fit(X_train_imputed, y_train)
+
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=0, n_jobs=6)
+    rf_model.fit(X_train_imputed, y_train)
+
+    predictions_linear_reg = linear_reg_model.predict(X_valid_imputed)
+    predictions_rf = rf_model.predict(X_valid_imputed)
+
+    mape_linear_reg = mape(y_valid, predictions_linear_reg)
+    wmape_linear_reg = wmape(y_valid, predictions_linear_reg)
+
+    mape_rf = mape(y_valid, predictions_rf)
+    wmape_rf = wmape(y_valid, predictions_rf)
+
+    print("Lineer Regresyon MAPE:", mape_linear_reg)
+    print("Lineer Regresyon WMAPE:", wmape_linear_reg)
+
+    print("RandomForestRegressor MAPE:", mape_rf)
+    print("RandomForestRegressor WMAPE:", wmape_rf)
+
+    new_examples = melt_valid[melt_valid['Month'] == 80].copy()
+    new_examples_imputed = pd.DataFrame(imputer.fit_transform(new_examples[features]), columns=features)
+
+    features = [feature for feature in features if feature in new_examples_imputed.columns]
+
+    predictions_linear_reg_future = linear_reg_model.predict(new_examples_imputed[features])
+    predictions_rf_future = rf_model.predict(new_examples_imputed[features])
+
+    new_examples['p_sales_next_month_linear_reg'] = predictions_linear_reg_future
+    new_examples['p_sales_next_month_rf'] = predictions_rf_future
+
+    print(new_examples[['Product_Code', 'Month', 'Sales', 'p_sales_next_month_linear_reg', 'p_sales_next_month_rf']])
+    
+
+print(df_week.head())
+train_and_evaluate_model(df_week)
+
+#%%
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
+
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error
+
+def train_and_evaluate_gb_model(df_week):
+
+    melt_gb = df_week.copy()
+
+    melt_gb['Product_Code'] = df_week['Ürün Kodu'].str.extract('(\d+)', expand=False).astype(int)
+    melt_gb['Month'] = df_week['Ay']
+    melt_gb['Week'] = df_week['Hafta']
+    melt_gb['Sales'] = melt_gb['Miktar']
+
+    melt_gb = melt_gb.drop(['Ürün Kodu', 'Müşteri Kodu', 'Net Tutar', 'Toplam', 'Hafta', 'Ay', 'Birim Fiyat', 'Tarih', 'Yıl', 'Miktar'], axis=1)
+
+    melt_gb['Product_Code'] = label_encoder.fit_transform(melt_gb['Product_Code']) + 1
+
+    split_point_gb = 65
+    melt_train_gb = melt_gb[melt_gb['Month'] < split_point_gb].copy()
+    melt_valid_gb = melt_gb[melt_gb['Month'] >= split_point_gb].copy()
+
+    target_gb = 'sales_next_month'
+
+    melt_train_gb[target_gb] = melt_train_gb.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid_gb[target_gb] = melt_valid_gb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_gb = melt_train_gb.dropna()
+
+    melt_train_gb['sales_next_month'] = melt_train_gb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_valid_gb['sales_next_month'] = melt_valid_gb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_gb = melt_train_gb.dropna()
+
+    melt_train_gb["lag_sales_1"] = melt_train_gb.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_valid_gb["lag_sales_1"] = melt_valid_gb.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_train_gb["diff_sales_1"] = melt_train_gb.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_valid_gb["diff_sales_1"] = melt_valid_gb.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_train_gb["mean_sales_4"] = melt_train_gb.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    melt_valid_gb["mean_sales_4"] = melt_valid_gb.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    features_gb = ['Sales', 'lag_sales_1', 'diff_sales_1', 'mean_sales_4']
+    target_gb = 'sales_next_month'
+
+    X_train_gb = melt_train_gb[features_gb]
+    y_train_gb = melt_train_gb[target_gb]
+    X_valid_gb = melt_valid_gb[features_gb]
+    y_valid_gb = melt_valid_gb[target_gb]
+
+    imputer = SimpleImputer()
+    X_train_imputed_gb = imputer.fit_transform(X_train_gb)
+    X_valid_imputed_gb = imputer.transform(X_valid_gb)
+
+    gb_model = GradientBoostingRegressor(n_estimators=100, random_state=0)
+    gb_model.fit(X_train_imputed_gb, y_train_gb)
+
+    y_pred_gb = gb_model.predict(X_valid_imputed_gb)
+
+    mape_gb = mape(y_valid_gb, y_pred_gb)
+    wmape_gb = wmape(y_valid_gb, y_pred_gb)
+
+    print("Gradient Boosting MAPE:", mape_gb)
+    print("Gradient Boosting WMAPE:", wmape_gb)
+
+    new_examples_gb = melt_valid_gb[melt_valid_gb['Month'] == 81].copy()
+    new_examples_imputed_gb = pd.DataFrame(imputer.fit_transform(new_examples_gb[features_gb]), columns=features_gb)
+
+    predictions_gb_future = gb_model.predict(new_examples_imputed_gb)
+
+    new_examples_gb['p_sales_next_month_gb'] = predictions_gb_future
+
+    print(new_examples_gb[['Product_Code', 'Month', 'Sales', 'p_sales_next_month_gb']])
+
+# Örnek Kullanım:
+train_and_evaluate_gb_model(df_week)
+
+#%%
+
+import lightgbm as lgb
+
+def train_and_evaluate_gbm_model(df_week):
+    melt_gbm = df_week.copy()
+
+    melt_gbm['Product_Code'] = df_week['Ürün Kodu'].str.extract('(\d+)', expand=False).astype(int)
+    melt_gbm['Month'] = df_week['Ay']
+    melt_gbm['Week'] = df_week['Hafta']
+    melt_gbm['Sales'] = melt_gbm['Miktar']
+
+    melt_gbm = melt_gbm.drop(['Ürün Kodu', 'Müşteri Kodu', 'Net Tutar', 'Toplam', 'Hafta', 'Ay', 'Birim Fiyat', 'Tarih', 'Yıl', 'Miktar'], axis=1)
+
+    melt_gbm['Product_Code'] = label_encoder.fit_transform(melt_gbm['Product_Code']) + 1
+
+    split_point_gbm = 65
+    melt_train_gbm = melt_gbm[melt_gbm['Month'] < split_point_gbm].copy()
+    melt_valid_gbm = melt_gbm[melt_gbm['Month'] >= split_point_gbm].copy()
+
+    target_gbm = 'sales_next_month'
+
+    melt_train_gbm[target_gbm] = melt_train_gbm.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid_gbm[target_gbm] = melt_valid_gbm.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_gbm = melt_train_gbm.dropna()
+
+    melt_train_gbm['sales_next_month'] = melt_train_gbm.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_valid_gbm['sales_next_month'] = melt_valid_gbm.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_gbm = melt_train_gbm.dropna()
+
+    melt_train_gbm["lag_sales_1"] = melt_train_gbm.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_valid_gbm["lag_sales_1"] = melt_valid_gbm.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_train_gbm["diff_sales_1"] = melt_train_gbm.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_valid_gbm["diff_sales_1"] = melt_valid_gbm.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_train_gbm["mean_sales_4"] = melt_train_gbm.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    melt_valid_gbm["mean_sales_4"] = melt_valid_gbm.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    features_gbm = ['Sales', 'lag_sales_1', 'diff_sales_1', 'mean_sales_4']
+    target_gbm = 'sales_next_month'
+
+    X_train_gbm = melt_train_gbm[features_gbm]
+    y_train_gbm = melt_train_gbm[target_gbm]
+    X_valid_gbm = melt_valid_gbm[features_gbm]
+    y_valid_gbm = melt_valid_gbm[target_gbm]
+    
+    imputer = SimpleImputer()
+    X_train_imputed_gbm = imputer.fit_transform(X_train_gbm)
+    X_valid_imputed_gbm = imputer.transform(X_valid_gbm)
+
+    gbm_model = lgb.LGBMRegressor(n_estimators=100, random_state=0, n_jobs=6)
+    gbm_model.fit(X_train_imputed_gbm, y_train_gbm)
+
+    y_pred_gbm = gbm_model.predict(X_valid_imputed_gbm)
+
+    mape_gbm = mape(y_valid_gbm, y_pred_gbm)
+    wmape_gbm = wmape(y_valid_gbm, y_pred_gbm)
+
+    print("LightGBM MAPE:", mape_gbm)
+    print("LightGBM WMAPE:", wmape_gbm)
+
+    new_examples_gbm = melt_valid_gbm[melt_valid_gbm['Month'] == 81].copy()
+    new_examples_imputed_gbm = pd.DataFrame(imputer.fit_transform(new_examples_gbm[features_gbm]), columns=features_gbm)
+
+    predictions_gbm_future = gbm_model.predict(new_examples_imputed_gbm)
+
+    new_examples_gbm['p_sales_next_month_gbm'] = predictions_gbm_future
+
+    print(new_examples_gbm[['Product_Code', 'Month', 'Sales', 'p_sales_next_month_gbm']])
+
+# Örnek Kullanım:
+train_and_evaluate_gbm_model(df_week)
+
+#%%
+
+import xgboost as xgb
+from sklearn.metrics import mean_absolute_error
+
+def train_and_evaluate_xgb_model(df_week):
+    melt_xgb = df_week.copy()
+
+    melt_xgb['Product_Code'] = df_week['Ürün Kodu'].str.extract('(\d+)', expand=False).astype(int)
+    melt_xgb['Month'] = df_week['Ay']
+    melt_xgb['Week'] = df_week['Hafta']
+    melt_xgb['Sales'] = melt_xgb['Miktar']
+
+    melt_xgb = melt_xgb.drop(['Ürün Kodu', 'Müşteri Kodu', 'Net Tutar', 'Toplam', 'Hafta', 'Ay', 'Birim Fiyat', 'Tarih', 'Yıl', 'Miktar'], axis=1)
+
+    melt_xgb['Product_Code'] = label_encoder.fit_transform(melt_xgb['Product_Code']) + 1
+
+    split_point_xgb = 65
+    melt_train_xgb = melt_xgb[melt_xgb['Month'] < split_point_xgb].copy()
+    melt_valid_xgb = melt_xgb[melt_xgb['Month'] >= split_point_xgb].copy()
+
+    target_xgb = 'sales_next_month'
+
+    melt_train_xgb[target_xgb] = melt_train_xgb.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid_xgb[target_xgb] = melt_valid_xgb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_xgb = melt_train_xgb.dropna()
+
+    melt_train_xgb['sales_next_month'] = melt_train_xgb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_valid_xgb['sales_next_month'] = melt_valid_xgb.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train_xgb = melt_train_xgb.dropna()
+
+    melt_train_xgb["lag_sales_1"] = melt_train_xgb.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_valid_xgb["lag_sales_1"] = melt_valid_xgb.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_train_xgb["diff_sales_1"] = melt_train_xgb.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_valid_xgb["diff_sales_1"] = melt_valid_xgb.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_train_xgb["mean_sales_4"] = melt_train_xgb.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    melt_valid_xgb["mean_sales_4"] = melt_valid_xgb.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    features_xgb = ['Sales', 'lag_sales_1', 'diff_sales_1', 'mean_sales_4']
+
+    X_train_xgb = melt_train_xgb[features_xgb]
+    y_train_xgb = melt_train_xgb[target_xgb]
+    X_valid_xgb = melt_valid_xgb[features_xgb]
+    y_valid_xgb = melt_valid_xgb[target_xgb]
+    
+    imputer = SimpleImputer()
+    X_train_imputed_xgb = imputer.fit_transform(X_train_xgb)
+    X_valid_imputed_xgb = imputer.transform(X_valid_xgb)
+
+    xgb_model = xgb.XGBRegressor(n_estimators=100, random_state=0, n_jobs=6)
+    xgb_model.fit(X_train_imputed_xgb, y_train_xgb)
+
+    y_pred_xgb = xgb_model.predict(X_valid_imputed_xgb)
+
+    mape_xgb = mape(y_valid_xgb, y_pred_xgb)
+    wmape_xgb = wmape(y_valid_xgb, y_pred_xgb)
+
+    print("XGBoost MAPE:", mape_xgb)
+    print("XGBoost WMAPE:", wmape_xgb)
+
+    new_examples_xgb = melt_valid_xgb[melt_valid_xgb['Month'] == 81].copy()
+    new_examples_imputed_xgb = pd.DataFrame(imputer.fit_transform(new_examples_xgb[features_xgb]), columns=features_xgb)
+
+    predictions_xgb_future = xgb_model.predict(new_examples_imputed_xgb)
+
+    new_examples_xgb['p_sales_next_month_xgb'] = predictions_xgb_future
+
+    print(new_examples_xgb[['Product_Code', 'Month', 'Sales', 'p_sales_next_month_xgb']])
+
+# Örnek Kullanım:
+train_and_evaluate_xgb_model(df_week)
+
+
+#%%
+from sklearn.model_selection import GridSearchCV
+from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import LabelEncoder
+from sklearn.impute import SimpleImputer
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+import xgboost as xgb
+import matplotlib.pyplot as plt
+import catboost
+from catboost import CatBoostRegressor
+
+
+df = pd.read_excel('new_filtered.xlsx')
+
+def plot_actual_vs_predicted(y_true, y_pred, model_name):
+    plt.scatter(y_true, y_pred)
+    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], '--k', linewidth=2)
+    plt.xlabel('Gerçek Değerler')
+    plt.ylabel('Tahmini Değerler')
+    plt.title(f'{model_name} - Gerçek vs. Tahmini Değerler')
+    plt.show()
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+k = 3
+
+pipe = Pipeline(steps=[
+    ("scaler", StandardScaler()),
+    ("pca", PCA(n_components=k,
+                random_state=1))
+])
+
+
+def plot_feature_importance(model, features, model_name):
+    importances = model.feature_importances_ if hasattr(model, 'feature_importances_') else model.coef_
+    feature_importance = pd.Series(importances, index=features)
+    feature_importance.nlargest(10).plot(kind='barh')
+    plt.xlabel('Özellik Önem Derecesi')
+    plt.title(f'{model_name} - Importance')
+    plt.show()
+
+def plot_error_distribution(y_true, y_pred, model_name):
+    errors = y_true - y_pred
+    plt.hist(errors, bins=30)
+    plt.xlabel('Hata (Gerçek - Tahmini)')
+    plt.ylabel('Frekans')
+    plt.title(f'{model_name} - Hata Dağılımı')
+    plt.show()
+    
+def train_and_evaluate_model(df):
+    
+    def mape(y_true, y_pred):
+        ape = np.abs((y_true - y_pred) / y_true)
+        ape[~np.isfinite(ape)] = 1.  # pessimist estimate
+        return np.mean(ape)
+
+    def wmape(y_true, y_pred):
+        return np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true))
+
+    label_encoder = LabelEncoder()
+    imputer = SimpleImputer()    
+    
+    melt = df.copy()
+    
+    melt['Ay'] = (melt['Tarih'].dt.year - melt['Tarih'].dt.year.min()) * 12 + melt['Tarih'].dt.month
+    melt['Hafta'] = (melt['Tarih'] - melt['Tarih'].min()).dt.days // 7 + 1
+    
+
+    melt['Month'] = melt['Ay']
+    melt['Week'] = melt['Hafta']
+    # melt['Customer_Code'] = melt['Müşteri Kodu']
+    melt['Sales'] = melt['Miktar']
+    melt['Product_Label'] = melt['Ürün Kodu']
+    melt['Product_Code'] = melt['Ürün Kodu'].str.extract('(\d+)', expand=False).astype(int)
+    melt = melt.dropna()
+    # melt['Customer_Code'] = melt['Customer_Code'].str.extract('(\d+)', expand=False).astype(int)
+    
+    print(melt.head())
+    print(melt.head(-5))
+    
+    melt = melt.drop(['Ürün Kodu', 'Müşteri Kodu', 'Net Tutar', 'Toplam', 'Hafta', 'Ay', 'Birim Fiyat', 'Tarih', 'Yıl', 'Miktar'], axis=1)
+
+    melt['Product_Code'] = label_encoder.fit_transform(melt['Product_Code']) + 1
+    # melt['Customer_Code'] = label_encoder.fit_transform(melt['Customer_Code']) + 1
+    
+    split_point = 65
+    melt_train = melt[melt['Month'] < split_point].copy()
+    melt_valid = melt[melt['Month'] >= split_point].copy()
+
+    target = 'sales_next_month'
+
+    melt_train[target] = melt_train.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid[target] = melt_valid.groupby("Product_Code")['Sales'].shift(-1)
+
+    melt_train = melt_train.dropna()
+
+    melt_train['sales_next_month'] = melt_train.groupby("Product_Code")['Sales'].shift(-1)
+    melt_valid['sales_next_month'] = melt_valid.groupby("Product_Code")['Sales'].shift(-1)
+    melt_train = melt_train.dropna()
+
+    melt_train["lag_sales_1"] = melt_train.groupby("Product_Code")['Sales'].shift(1)
+    melt_valid["lag_sales_1"] = melt_valid.groupby("Product_Code")['Sales'].shift(1)
+
+    melt_train["diff_sales_1"] = melt_train.groupby("Product_Code")['Sales'].diff(1)
+    melt_valid["diff_sales_1"] = melt_valid.groupby("Product_Code")['Sales'].diff(1)
+
+    melt_train["mean_sales_4"] = melt_train.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+    melt_valid["mean_sales_4"] = melt_valid.groupby("Product_Code")['Sales'].rolling(4).mean().reset_index(level=0, drop=True)
+
+    features = [ 'Product_Code', 'Sales', 'lag_sales_1', 'diff_sales_1', 'mean_sales_4','Month','Week']
+    target = 'sales_next_month'
+
+    X_train = melt_train[features]
+    y_train = melt_train[target]
+    X_valid = melt_valid[features]
+    y_valid = melt_valid[target]
+
+    X_train_imputed = imputer.fit_transform(X_train)
+    X_valid_imputed = imputer.transform(X_valid)
+
+    gb_model = GradientBoostingRegressor(n_estimators=100, random_state=0)
+    linear_reg_model = LinearRegression()
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=0, n_jobs=6)
+
+    models = [
+        (lgb.LGBMRegressor(n_estimators=100, random_state=0, n_jobs=6), "LGBM", 'lgb',
+         {'n_estimators': [50, 100, 200],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'num_leaves': [31, 50, 100],
+        'min_child_samples': [20, 30, 50]}),
+        
+        (xgb.XGBRegressor(n_estimators=100, random_state=0, n_jobs=6), "XGBoost",'xgb',
+        {'n_estimators': [50, 100, 200],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'max_depth': [3, 5, 7],
+        'min_child_weight': [1, 3, 5]}),
+        (GradientBoostingRegressor(n_estimators=100, random_state=0),"GradientBoost","gb_model",
+         {'n_estimators': [50, 100, 200],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'max_depth': [3, 5, 7]}),
+        # (LinearRegression(),"LinearReg","linear_reg_model"),
+        (RandomForestRegressor(n_estimators=100, random_state=0, n_jobs=6), "RandomForest", "rf_model",
+         {'n_estimators': [50, 100, 200],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]}),
+        # (catboost.CatBoostRegressor(iterations=100, random_state=0, task_type='GPU', devices='0:1'), "CatBoost", 'catboost',
+        #  {'iterations': [50, 100, 200],
+        #   'learning_rate': [0.01, 0.1, 0.2],
+        #   'depth': [3, 5, 7]},  # grid_params eklendi
+        #  )
+        ]
+
+    for model,name,model_type,grid_params in models:
+        
+        delfault_params = model.get_params()
+        print("Default parameters: "+str(delfault_params))
+        
+        if name == "LinearReg":
+            model.fit(X_train_imputed, y_train)
+        else:
+            grid_search = GridSearchCV(model, grid_params, scoring='neg_mean_absolute_error', cv=3)
+            grid_search.fit(X_train_imputed, y_train)
+            best_params = grid_search.best_params_
+            model.fit(X_train_imputed, y_train)
+            
+            model = model.set_params(**best_params)
+            model.fit(X_train_imputed, y_train)   
+        
+        y_pred = model.predict(X_valid_imputed)
+        
+        print("Params after grid search: "+str(best_params))
+        mape_val = mape(y_valid, y_pred)
+        wmape_val = wmape(y_valid, y_pred)
+    
+        print(f"{model_type.upper()} MAPE: {mape_val}")
+        print(f"{model_type.upper()} WMAPE: {wmape_val}")
+     
+        new_examples = melt_valid[melt_valid['Month'] == 81].copy()
+        new_examples_imputed = pd.DataFrame(imputer.fit_transform(new_examples[features]), columns=features)
+    
+        predictions_future = model.predict(new_examples_imputed)
+    
+        new_examples[f'p_sales_next_month_{name}'] = predictions_future
+    
+        print(new_examples[['Product_Label','Product_Code', 'Month', 'Sales', f'p_sales_next_month_{name}']])
+        
+        plot_feature_importance(model, features, name)
+        plot_error_distribution(y_valid, y_pred, name)
+        plot_actual_vs_predicted(y_valid, y_pred, name)
+
+    print(melt_valid['Product_Code'].nunique())
+
+train_and_evaluate_model(df)
+
+"""
+ürün adını da df'e ekle hangi ürün olduğu belli olsun
+lineer trend oluştur
+training 
+"""
+
+#%%
+import pandas as pd
+from prophet import Prophet
+
+df = pd.read_excel('new_filtered.xlsx')
+
+df_train = df.copy()
+
+print(df_train.info())
+
+# df_train['Müşteri Kodu'] = df_train['Müşteri Kodu'].astype('category').cat.codes
+
+df_train.rename(columns={'Tarih': 'ds', 'Miktar': 'y'}, inplace = True)
+
+
+#%% PROPHET
+
+model = Prophet()
+
+model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+
+# 'Müşteri Kodu' ve 'Birim Fiyat' sütunlarını regresör olarak ekleyin
+# model.add_regressor('Müşteri Kodu')
+# model.add_regressor('Birim Fiyat')
+
+
+model.fit(df_train)
+
+future = model.make_future_dataframe(periods=365)
+future.tail()
+
+forecast = model.predict(future)
+forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail()
+
+fig1 = model.plot(forecast)
+
+fig2 = model.plot_components(forecast)
+
+#%%
+
+print(df_train.head())
+
+print(df_filtered.head())
 
